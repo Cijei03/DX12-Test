@@ -1,7 +1,7 @@
 #define GLFW_EXPOSE_NATIVE_WIN32
  
-#include <GLFW/glfw3.h>
-#include <GLFW/glfw3native.h>
+#include <glfw3.h>
+#include <glfw3native.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
@@ -60,11 +60,12 @@ void InitDevice()
     assert(result == S_OK);
 }
  
-ComPtr<ID3D12CommandQueue> commandBuffer{};
+ComPtr<ID3D12CommandQueue>      commandBuffer{};
+_CONSTEVAL auto                 COMMAND_LIST_TYPE  = D3D12_COMMAND_LIST_TYPE_DIRECT;
 void InitCommandBuffer()
 {
     D3D12_COMMAND_QUEUE_DESC creationInfo{};
-    creationInfo.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    creationInfo.Type = COMMAND_LIST_TYPE;
  
     assert(dvc->CreateCommandQueue(&creationInfo, IID_PPV_ARGS(&commandBuffer)) == S_OK);
 }
@@ -72,24 +73,26 @@ void InitCommandBuffer()
 ComPtr<ID3D12CommandAllocator> commandAllocator{};
 void InitCommandAllocator()
 {
-    const auto result = dvc->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocator));
+    const auto result = dvc->CreateCommandAllocator(COMMAND_LIST_TYPE, IID_PPV_ARGS(&commandAllocator));
     assert(result == S_OK);
+    commandAllocator->Reset();
 }
  
 ComPtr<ID3D12GraphicsCommandList> commandList{};
 void InitCommandList()
 {
-    const auto result = dvc->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&commandList));
+    const auto result = dvc->CreateCommandList(0, COMMAND_LIST_TYPE, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&commandList));
     assert(result == S_OK);
  
     commandList->Close();
 }
  
-ComPtr<IDXGISwapChain3> swp{};
+ComPtr<IDXGISwapChain3>     swp{};
+_CONSTEVAL UINT32           BACK_BUFFER_COUNT = 2;
 void InitSwapchain()
 {
     DXGI_SWAP_CHAIN_DESC1 creationInfo{};
-    creationInfo.BufferCount = 2;
+    creationInfo.BufferCount = BACK_BUFFER_COUNT;
     creationInfo.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     creationInfo.Flags = 0;
     creationInfo.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -105,9 +108,9 @@ void InitSwapchain()
     localSwp.As(&swp);
 }
  
-ComPtr<ID3D12DescriptorHeap> RenderTargetViewHeap;
-D3D12_CPU_DESCRIPTOR_HANDLE RTV_CPU_Handles[2];
-ComPtr<ID3D12Resource> SwapchainSurface[2];
+ComPtr<ID3D12DescriptorHeap>        RenderTargetViewHeap;
+D3D12_CPU_DESCRIPTOR_HANDLE         RTV_CPU_Handles[BACK_BUFFER_COUNT];
+ComPtr<ID3D12Resource>              SwapchainSurface[BACK_BUFFER_COUNT];
 D3D12_CPU_DESCRIPTOR_HANDLE GetHeapOffset(SIZE_T StartHeapPtr, INT offsetInDescriptors, UINT descriptorIncrementSize) noexcept
 {
     D3D12_CPU_DESCRIPTOR_HANDLE tempDesc{};
@@ -118,29 +121,28 @@ void InitRenderTargetViews()
 {
     D3D12_DESCRIPTOR_HEAP_DESC creationInfo{};
     creationInfo.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    creationInfo.NumDescriptors = 2;
+    creationInfo.NumDescriptors = BACK_BUFFER_COUNT;
     creationInfo.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     creationInfo.NodeMask = 0;
  
     
     assert(dvc->CreateDescriptorHeap(&creationInfo, IID_PPV_ARGS(&RenderTargetViewHeap)) == S_OK);
+
+    const auto RTV_CPU_Handle   = RenderTargetViewHeap->GetCPUDescriptorHandleForHeapStart();
+    const auto RTVSize      = dvc->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
  
-    auto RTV_CPU_Handle = RenderTargetViewHeap->GetCPUDescriptorHandleForHeapStart();
- 
-    const auto RTVSize = dvc->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
- 
-    for (uint32_t i = 0; i < 2; i++)
+    for (uint32_t i = 0; i < BACK_BUFFER_COUNT; i++)
     {
-        assert(swp->GetBuffer(0, IID_PPV_ARGS(&SwapchainSurface[i])) == S_OK);
-        swp->GetBuffer(0, IID_PPV_ARGS(&SwapchainSurface[i]));
+        //assert(swp->GetBuffer(0, IID_PPV_ARGS(&SwapchainSurface[i])) == S_OK);
+        //NOTE We should iterate over all of BACK_BUFFER_COUNT in swap chain !!!
+        swp->GetBuffer(i, IID_PPV_ARGS(&SwapchainSurface[i]));
         RTV_CPU_Handles[i] = GetHeapOffset(RTV_CPU_Handle.ptr, i, RTVSize);
         dvc->CreateRenderTargetView(SwapchainSurface[i].Get(), nullptr, RTV_CPU_Handles[i]);
     }
-    
 }
  
-ComPtr<ID3D12Fence> Fence{};
-HANDLE FenceEventHandler{};
+ComPtr<ID3D12Fence>     Fence{};
+HANDLE                  FenceEventHandler{};
 void InitFence()
 {
     const auto result = dvc->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
@@ -149,41 +151,47 @@ void InitFence()
     assert(FenceEventHandler);
 }
  
-D3D12_CPU_DESCRIPTOR_HANDLE Current_RTV_CPU_Handle{};
-uint32_t CurrentBufferIndex;
+D3D12_CPU_DESCRIPTOR_HANDLE     Current_RTV_CPU_Handle{};
+uint32_t                        CurrentBufferIndex{};
 void ConfigBuffers()
 {
+    constexpr auto STATE_PRESENT        = D3D12_RESOURCE_STATE_PRESENT;
+    constexpr auto STATE_RENDER_TARGET  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    Current_RTV_CPU_Handle = RTV_CPU_Handles[CurrentBufferIndex];
+
     // Setup backbuffer barrier.
     {
         D3D12_RESOURCE_BARRIER barrierInfo{};
         barrierInfo.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrierInfo.Transition.pResource = SwapchainSurface[CurrentBufferIndex].Get();
-        barrierInfo.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrierInfo.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrierInfo.Transition.StateBefore = STATE_PRESENT;
+        barrierInfo.Transition.StateAfter = STATE_RENDER_TARGET;
         barrierInfo.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
  
         commandList->ResourceBarrier(1, &barrierInfo);
     }
-    Current_RTV_CPU_Handle = RTV_CPU_Handles[CurrentBufferIndex];
- 
-    float ClearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
- 
+
+    constexpr float ClearColor[] = { 0.5f, 0.5f, 0.0f, 1.0f };
+    commandList->OMSetRenderTargets(1, &Current_RTV_CPU_Handle, true, nullptr);
     commandList->ClearRenderTargetView(Current_RTV_CPU_Handle, ClearColor, 0, nullptr);
- 
+
     // Setup frontbuffer barrier.
     {
         D3D12_RESOURCE_BARRIER barrierInfo{};
         barrierInfo.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrierInfo.Transition.pResource = SwapchainSurface[CurrentBufferIndex].Get();
-        barrierInfo.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barrierInfo.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        barrierInfo.Transition.StateBefore = STATE_RENDER_TARGET;
+        barrierInfo.Transition.StateAfter = STATE_PRESENT;
         barrierInfo.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
  
         commandList->ResourceBarrier(1, &barrierInfo);
     }
+
+    // After all commands recording, close command list
+    commandList->Close();
 }
  
-int main()
+int main(int argc, char * argv[])
 {
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -199,44 +207,50 @@ int main()
     InitCommandList();
     InitSwapchain();
     InitRenderTargetViews();
- 
-    CurrentBufferIndex = swp->GetCurrentBackBufferIndex();
- 
-    int x = 0;
- 
-    while (!glfwWindowShouldClose(wnd) && x < 2)
+
+    UINT64 fenceValue = 1; // fence has been initialized with value 0, so on CPU side we start from 1,
+	// when GPU will signal end of command list work submission, completed fence value will be 1 as well and so on.
+    UINT64 swapChainBufferIdx = 0;
+    while (!glfwWindowShouldClose(wnd))
     {
         glfwPollEvents();
- 
+
+
+        // Prepare Command Allocator and Command list for new commands recording
         commandAllocator->Reset();
- 
         commandList->Reset(commandAllocator.Get(), nullptr);
- 
+
+
+		// Configure and populate all of the buffers needed for rendering a frame
         ConfigBuffers();
- 
-        //commandList->OMSetRenderTargets(1, &Current_RTV_CPU_Handle, true, nullptr);
- 
-        commandList->Close();
- 
+
+
+        // Execute command lists
         ID3D12CommandList* Cmds[] =
         {
             commandList.Get()
         };
- 
-        commandBuffer->ExecuteCommandLists(1, Cmds);
- 
+        commandBuffer->ExecuteCommandLists(_countof(Cmds), Cmds);
+
+
+        // Preset the back buffer
         swp->Present(1, 0);
- 
-        commandBuffer->Signal(Fence.Get(), 1);
- 
-        if (Fence->GetCompletedValue() != 1)
+
+
+        // Synchronization point (fence)
+        commandBuffer->Signal(Fence.Get(), fenceValue);
+        if (Fence->GetCompletedValue() < fenceValue)
         {
-            Fence->SetEventOnCompletion(1, FenceEventHandler);
+            Fence->SetEventOnCompletion(fenceValue, FenceEventHandler);
             WaitForSingleObject(FenceEventHandler, INFINITE);
         }
+
         CurrentBufferIndex = swp->GetCurrentBackBufferIndex();
-        x++;
+        //CurrentBufferIndex = swp->GetCurrentBackBufferIndex() % BACK_BUFFER_COUNT; // modulo is not needed, just go to know and note it
+        ++fenceValue;
     }
  
     glfwTerminate();
+
+    return EXIT_SUCCESS;
 }
